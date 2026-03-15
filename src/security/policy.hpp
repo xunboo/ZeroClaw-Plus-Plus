@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -159,7 +159,19 @@ public:
     /// Return the first path-like argument blocked by path policy.
     std::string forbidden_path_argument(const std::string& command) const;
 
-    /// Check if a file path is allowed (no path traversal, within workspace)
+    /// Result of a path security check
+    struct PathCheckResult {
+        bool allowed = false;
+        std::string reason;
+    };
+
+    /// Check if a path is allowed for reading
+    PathCheckResult check_path_read(const std::string& path) const;
+    
+    /// Check if a path is allowed for writing
+    PathCheckResult check_path_write(const std::string& path) const;
+
+    /// Check if a path is allowed (no path traversal, within workspace)
     bool is_path_allowed(const std::string& path) const;
 
     /// Validate that a resolved path is inside the workspace or an allowed root.

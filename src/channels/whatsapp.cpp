@@ -1,4 +1,5 @@
-﻿#include "whatsapp.hpp"
+#include "whatsapp.hpp"
+#include "../http/http_client.hpp"
 #include <chrono>
 
 namespace zeroclaw {
@@ -57,15 +58,38 @@ WhatsAppChannel::parse_webhook_payload(const nlohmann::json& payload) const {
                 }
                 if (body.empty()) continue;
 
-                auto now = std::chrono::system_clock::now();
-                uint64_t ts = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        now.time_since_epoch()).count());
+                // Rust: try to parse msg["timestamp"] as a u64 string,
+                // fall back to now() only if missing or unparseable.
+                uint64_t ts = 0;
+                bool parsed_ts = false;
+                if (msg.contains("timestamp")) {
+                    if (msg["timestamp"].is_string()) {
+                        try {
+                            ts = std::stoull(msg["timestamp"].get<std::string>());
+                            parsed_ts = true;
+                        } catch (...) {}
+                    } else if (msg["timestamp"].is_number_unsigned()) {
+                        ts = msg["timestamp"].get<uint64_t>();
+                        parsed_ts = true;
+                    }
+                }
+                if (!parsed_ts) {
+                    auto now = std::chrono::system_clock::now();
+                    ts = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            now.time_since_epoch()).count());
+                }
+
+                // Normalize sender: ensure + prefix (matching Rust normalize logic)
+                std::string sender = from;
+                if (!sender.empty() && sender[0] != '+') {
+                    sender = "+" + sender;
+                }
 
                 ChannelMessage cm;
                 cm.id = msg.contains("id") ? msg["id"].get<std::string>() : "";
-                cm.sender = from;
-                cm.reply_target = from;
+                cm.sender = sender;
+                cm.reply_target = sender;
                 cm.content = body;
                 cm.channel = "whatsapp";
                 cm.timestamp = ts;
@@ -78,14 +102,36 @@ WhatsAppChannel::parse_webhook_payload(const nlohmann::json& payload) const {
 }
 
 bool WhatsAppChannel::send(const SendMessage& message) {
-    // Would POST to graph.facebook.com /v18.0/{endpoint_id}/messages
-    (void)message;
-    return true;
+    // Matching Rust: POST https://graph.facebook.com/v18.0/{endpoint_id}/messages
+    // with Authorization: Bearer {access_token}
+    // Body: { "messaging_product": "whatsapp", "to": "<recipient without +>",
+    //         "type": "text", "text": { "body": "<content>" } }
+    //
+    // Rust strips the leading '+' from the recipient for the API call.
+    std::string to = message.recipient;
+    if (!to.empty() && to[0] == '+') {
+        to = to.substr(1);
+    }
+
+    nlohmann::json body = {
+        {"messaging_product", "whatsapp"},
+        {"to", to},
+        {"type", "text"},
+        {"text", {{"body", message.content}}}
+    };
+
+    http::HttpClient client;
+    client.with_bearer_token(access_token_);
+
+    const std::string url =
+        "https://graph.facebook.com/v18.0/" + endpoint_id_ + "/messages";
+    auto resp = client.post_json(url, body);
+    return resp.ok();
 }
 
 bool WhatsAppChannel::listen(std::function<void(const ChannelMessage&)> /*callback*/) {
-    // Webhook-based ?messages received via gateway endpoint
-
+    // WhatsApp is webhook-based; messages arrive via the gateway endpoint.
+    // Matches Rust's placeholder loop that simply awaits cancellation.
     return true;
 }
 
@@ -95,5 +141,3 @@ bool WhatsAppChannel::health_check() const {
 
 } // namespace channels
 } // namespace zeroclaw
-
-

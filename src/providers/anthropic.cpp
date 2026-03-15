@@ -1,4 +1,4 @@
-﻿#include "anthropic.hpp"
+#include "anthropic.hpp"
 #include "../http/http_client.hpp"
 #include "../tools/traits.hpp"
 
@@ -34,15 +34,69 @@ nlohmann::json AnthropicProvider::to_api_system_prompt(const std::string& system
 
 nlohmann::json AnthropicProvider::to_api_messages(const std::vector<ChatMessage>& messages) {
     nlohmann::json result = nlohmann::json::array();
+    std::optional<ChatMessage> last_message;
+
     for (const auto& msg : messages) {
-        if (msg.role == "system") continue;  // System prompt handled separately
+        if (msg.role == "system") continue; // System prompt handled separately
+
+        // Anthropic API requires alternating roles.
+        // If the current message has the same role as the last one,
+        // and it's not a tool_result (which always follows an assistant tool_use),
+        // we merge it into the previous message.
+        if (last_message.has_value() && last_message->role == msg.role && msg.role != "tool") {
+            // Merge content into the last message
+            if (msg.role == "user") {
+                // For user messages, content can be an array of blocks.
+                // If the last message's content is a string, convert it to an array first.
+                if (result.back()["content"].is_string()) {
+                    result.back()["content"] = nlohmann::json::array({
+                        {{"type", "text"}, {"text", result.back()["content"].get<std::string>()}}
+                    });
+                }
+                // Add new text block
+                if (!msg.content.empty()) {
+                    result.back()["content"].push_back({{"type", "text"}, {"text", msg.content}});
+                }
+                // Add tool results if any
+                if (!msg.tool_call_id.empty()) {
+                    result.back()["content"].push_back({
+                        {"type", "tool_result"}, {"tool_use_id", msg.tool_call_id},
+                        {"content", msg.content}
+                    });
+                }
+            } else if (msg.role == "assistant") {
+                // For assistant messages, content can be an array of blocks.
+                // If the last message's content is a string, convert it to an array first.
+                if (result.back()["content"].is_string()) {
+                    result.back()["content"] = nlohmann::json::array({
+                        {{"type", "text"}, {"text", result.back()["content"].get<std::string>()}}
+                    });
+                }
+                // Add new text block
+                if (!msg.content.empty()) {
+                    result.back()["content"].push_back({{"type", "text"}, {"text", msg.content}});
+                }
+                // Add tool calls if any
+                for (const auto& tc : msg.tool_calls) {
+                    nlohmann::json args;
+                    try { args = nlohmann::json::parse(tc.arguments); }
+                    catch (...) { args = tc.arguments; }
+                    result.back()["content"].push_back({
+                        {"type", "tool_use"}, {"id", tc.id},
+                        {"name", tc.name}, {"input", args}
+                    });
+                }
+            }
+            last_message = msg; // Update last_message to the current one for subsequent checks
+            continue;
+        }
 
         nlohmann::json m;
         m["role"] = msg.role;
 
         if (msg.role == "assistant" && !msg.tool_calls.empty()) {
             nlohmann::json content = nlohmann::json::array();
-            if (!msg.content.empty()) {
+            if (!msg.content.empty()) { // Only add text block if content is not empty
                 content.push_back({{"type", "text"}, {"text", msg.content}});
             }
             for (const auto& tc : msg.tool_calls) {
@@ -54,18 +108,28 @@ nlohmann::json AnthropicProvider::to_api_messages(const std::vector<ChatMessage>
                     {"name", tc.name}, {"input", args}
                 });
             }
-            m["content"] = content;
+            if (!content.empty()) { // Only add content field if there's actual content
+                m["content"] = content;
+            }
         } else if (!msg.tool_call_id.empty()) {
-            m["role"] = "user";
-            m["content"] = nlohmann::json::array({
-                {{"type", "tool_result"}, {"tool_use_id", msg.tool_call_id},
-                 {"content", msg.content}}
+            m["role"] = "user"; // Tool results are always from the user
+            nlohmann::json content_blocks = nlohmann::json::array();
+            content_blocks.push_back({
+                {"type", "tool_result"}, {"tool_use_id", msg.tool_call_id},
+                {"content", msg.content}
             });
+            m["content"] = content_blocks;
         } else {
-            m["content"] = msg.content;
+            if (!msg.content.empty()) { // Only add content field if content is not empty
+                m["content"] = msg.content;
+            }
         }
 
-        result.push_back(m);
+        // Only add message if it has content or is a tool call/result
+        if (m.contains("content") || (msg.role == "assistant" && !msg.tool_calls.empty()) || !msg.tool_call_id.empty()) {
+            result.push_back(m);
+            last_message = msg;
+        }
     }
     return result;
 }

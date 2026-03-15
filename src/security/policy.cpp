@@ -1,4 +1,4 @@
-﻿#include "policy.hpp"
+#include "policy.hpp"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -582,13 +582,27 @@ std::string SecurityPolicy::forbidden_path_argument(const std::string& command) 
 }
 
 bool SecurityPolicy::is_path_allowed(const std::string& path) const {
+    return check_path_read(path).allowed;
+}
+
+SecurityPolicy::PathCheckResult SecurityPolicy::check_path_read(const std::string& path) const {
+    PathCheckResult result;
+    
     // Block null bytes
-    if (path.find('\0') != std::string::npos) return false;
+    if (path.find('\0') != std::string::npos) {
+        result.allowed = false;
+        result.reason = "null byte in path";
+        return result;
+    }
 
     // Block path traversal: check for ".." components
     auto fs_path = std::filesystem::path(path);
     for (const auto& component : fs_path) {
-        if (component == "..") return false;
+        if (component == "..") {
+            result.allowed = false;
+            result.reason = "path traversal (..) is forbidden";
+            return result;
+        }
     }
 
     // Block URL-encoded traversal
@@ -596,19 +610,27 @@ bool SecurityPolicy::is_path_allowed(const std::string& path) const {
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return std::tolower(c); });
     if (lower.find("..%2f") != std::string::npos || lower.find("%2f..") != std::string::npos) {
-        return false;
+        result.allowed = false;
+        result.reason = "URL-encoded path traversal is forbidden";
+        return result;
     }
 
     // Reject ~user forms
     if (!path.empty() && path[0] == '~' && path != "~" &&
         (path.size() < 2 || path[1] != '/')) {
-        return false;
+        result.allowed = false;
+        result.reason = "~user paths are forbidden; use ~/ for home directory";
+        return result;
     }
 
     auto expanded_path = expand_user_path(path);
 
     // Block absolute paths when workspace_only
-    if (workspace_only && expanded_path.is_absolute()) return false;
+    if (workspace_only && expanded_path.is_absolute()) {
+        result.allowed = false;
+        result.reason = "absolute paths are forbidden; use relative paths within the workspace";
+        return result;
+    }
 
     // Block forbidden paths
     for (const auto& forbidden : forbidden_paths) {
@@ -616,11 +638,21 @@ bool SecurityPolicy::is_path_allowed(const std::string& path) const {
         auto expanded_str = expanded_path.string();
         auto forbidden_str = forbidden_path.string();
         if (expanded_str.substr(0, forbidden_str.size()) == forbidden_str) {
-            return false;
+            result.allowed = false;
+            result.reason = "path is in a forbidden system directory: " + forbidden;
+            return result;
         }
     }
 
-    return true;
+    result.allowed = true;
+    return result;
+}
+
+SecurityPolicy::PathCheckResult SecurityPolicy::check_path_write(const std::string& path) const {
+    if (autonomy == AutonomyLevel::ReadOnly) {
+        return {false, "write access denied: autonomy level is read-only"};
+    }
+    return check_path_read(path);
 }
 
 bool SecurityPolicy::is_resolved_path_allowed(const std::filesystem::path& resolved) const {

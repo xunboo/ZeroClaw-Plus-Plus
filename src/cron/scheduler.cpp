@@ -1,4 +1,4 @@
-﻿#include "scheduler.hpp"
+#include "scheduler.hpp"
 #include "store.hpp"
 #include "schedule.hpp"
 #include <chrono>
@@ -123,9 +123,115 @@ JobResult execute_shell_job(
 }
 
 namespace scheduler {
-    void run(const zeroclaw::config::Config& config) {
-        // Stub implementation
+
+// Matching Rust: MIN_POLL_SECONDS = 5
+static constexpr uint64_t MIN_POLL_SECONDS = 5;
+// Matching Rust: SHELL_JOB_TIMEOUT_SECS = 120
+static constexpr uint64_t SHELL_JOB_TIMEOUT_SECS = 120;
+
+/// Execute a job with retry+backoff, matching Rust execute_job_with_retry()
+static JobResult execute_with_retry(
+    const zeroclaw::config::Config& config,
+    const CronJob& job,
+    int retries,
+    uint64_t backoff_ms)
+{
+    JobResult last{false, ""};
+
+    const std::string autonomy = config.autonomy.level;
+    const auto& allowed = config.autonomy.allowed_commands;
+    const auto& forbidden = config.autonomy.forbidden_paths;
+
+    for (int attempt = 0; attempt <= retries; ++attempt) {
+        last = execute_shell_job(
+            config.workspace_dir.string(),
+            job, autonomy, allowed, forbidden,
+            SHELL_JOB_TIMEOUT_SECS);
+
+        if (last.success) return last;
+
+        // Matching Rust: deterministic policy violations are not retryable
+        if (last.output.rfind("blocked by security policy:", 0) == 0) return last;
+
+        if (attempt < retries) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            backoff_ms = std::min(backoff_ms * 2, uint64_t{30000});
+        }
+    }
+    return last;
+}
+
+void run(const zeroclaw::config::Config& config) {
+    // Matching Rust: poll_secs = max(config.reliability.scheduler_poll_secs, MIN_POLL_SECONDS)
+    uint64_t poll_secs = std::max(
+        static_cast<uint64_t>(config.reliability.scheduler_poll_secs),
+        MIN_POLL_SECONDS);
+
+    int retries = config.reliability.scheduler_retries;
+    uint64_t backoff_ms = std::max(config.reliability.provider_backoff_ms, uint64_t{200});
+
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(poll_secs));
+
+        // Query due jobs (matching Rust: due_jobs(&config, Utc::now()))
+        auto now = std::chrono::system_clock::now();
+        std::vector<CronJob> due;
+        try {
+            due = due_jobs(config.workspace_dir.string(), static_cast<int>(config.scheduler.max_tasks), now);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[scheduler] query failed: %s\n", e.what());
+            continue;
+        }
+
+        // Execute each due job
+        for (const auto& job : due) {
+            warn_if_high_frequency_agent_job(job);
+
+            auto started_at = std::chrono::system_clock::now();
+            auto result = execute_with_retry(config, job, retries, backoff_ms);
+            auto finished_at = std::chrono::system_clock::now();
+            auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                finished_at - started_at).count();
+
+            if (!result.success) {
+                std::fprintf(stderr, "[scheduler] job '%s' failed: %s\n",
+                             job.id.c_str(), result.output.c_str());
+            }
+
+            // Persist run record (matching Rust: record_run)
+            try {
+                record_run(config.workspace_dir.string(), static_cast<int>(config.cron.max_run_history), job.id, started_at, finished_at,
+                           result.success ? "ok" : "error",
+                           result.output, duration_ms);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[scheduler] record_run failed: %s\n", e.what());
+            }
+
+            // One-shot auto-delete (matching Rust: is_one_shot_auto_delete)
+            if (is_one_shot_auto_delete(job)) {
+                if (result.success) {
+                    try { remove_job(config.workspace_dir.string(), job.id); } catch (...) {}
+                } else {
+                    try {
+                        CronJobPatch patch;
+                        patch.enabled = false;
+                        update_job(config.workspace_dir.string(), static_cast<int>(config.scheduler.max_tasks), job.id, patch);
+                    } catch (...) {}
+                }
+                continue;
+            }
+
+            // Reschedule after run (matching Rust: reschedule_after_run)
+            try {
+                reschedule_after_run(config.workspace_dir.string(), static_cast<int>(config.scheduler.max_tasks), job.id, job.schedule, result.success, result.output);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[scheduler] reschedule failed: %s\n", e.what());
+            }
+        }
     }
 }
+
+} // namespace scheduler
+
 
 }

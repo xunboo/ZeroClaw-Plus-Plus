@@ -1,4 +1,4 @@
-﻿#include "static_files.hpp"
+#include "static_files.hpp"
 #include <unordered_map>
 #include <mutex>
 
@@ -56,6 +56,10 @@ http::Response handle_static(const http::Request& req) {
     if (prefix_pos != std::string::npos) {
         path = path.substr(prefix_pos + 6);
     }
+    // Strip any remaining leading slash (matches Rust's trim_start_matches('/'))
+    while (!path.empty() && path[0] == '/') {
+        path = path.substr(1);
+    }
     
     std::lock_guard<std::mutex> lock(g_provider_mutex);
     
@@ -95,8 +99,9 @@ http::Response handle_spa_fallback(const http::Request& req) {
     
     if (!g_asset_provider) {
         http::Response resp;
-        resp.status_code = http::StatusCode::NOT_FOUND;
-        resp.body = "Not found";
+        // Service unavailable: web dashboard not built (matches Rust SERVICE_UNAVAILABLE)
+        resp.status_code = http::StatusCode::SERVICE_UNAVAILABLE;
+        resp.body = "Web dashboard not available. Build it with: cd web && npm ci && npm run build";
         resp.content_type = "text/plain";
         return resp;
     }

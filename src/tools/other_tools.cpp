@@ -1,8 +1,9 @@
-﻿#include "other_tools.hpp"
+#include "other_tools.hpp"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <regex>
+#include "security/policy.hpp"
 
 namespace fs = std::filesystem;
 
@@ -30,11 +31,76 @@ nlohmann::json ContentSearchTool::parameters_schema() const {
 ToolResult ContentSearchTool::execute(const nlohmann::json& args) {
     if (!args.contains("pattern")) return ToolResult::fail("Missing: pattern");
     std::string pattern = args["pattern"].get<std::string>();
-    int max_results = args.value("max_results", 50);
+    bool case_sensitive = args.value("case_sensitive", false);
+    // Rust cap: 1000 matches
+    static constexpr size_t MAX_MATCHES = 1000;
 
-    // Would use ripgrep or std::regex to search file contents
-    (void)pattern; (void)max_results;
-    return ToolResult::ok("[content_search - not fully implemented]");
+    // Determine search root
+    std::string search_path = ".";
+    if (args.contains("path") && args["path"].is_string()) {
+        search_path = args["path"].get<std::string>();
+    }
+    if (security_) {
+        auto check = security_->check_path_read(search_path);
+        if (!check.allowed) return ToolResult::fail(check.reason);
+    }
+
+    // Compile regex (matching Rust: ripgrep-style line search)
+    std::regex re;
+    try {
+        auto flags = std::regex::ECMAScript;
+        if (!case_sensitive) flags |= std::regex::icase;
+        re = std::regex(pattern, flags);
+    } catch (const std::regex_error& e) {
+        return ToolResult::fail(std::string("Invalid pattern: ") + e.what());
+    }
+
+    // Collect matches: vector of (filepath_str, line_number, line_content)
+    struct Match { std::string file; size_t line; std::string content; };
+    std::vector<Match> matches;
+    bool capped = false;
+
+    std::error_code ec;
+    for (const auto& entry : fs::recursive_directory_iterator(search_path, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+
+        std::ifstream f(entry.path());
+        if (!f) continue;
+
+        std::string rel = fs::relative(entry.path(), search_path, ec).string();
+        if (ec) rel = entry.path().string();
+
+        std::string line_text;
+        size_t lineno = 0;
+        while (std::getline(f, line_text)) {
+            ++lineno;
+            if (std::regex_search(line_text, re)) {
+                matches.push_back({rel, lineno, line_text});
+                if (matches.size() >= MAX_MATCHES) { capped = true; break; }
+            }
+        }
+        if (capped) break;
+    }
+
+    // Sort by (file, line) — matching Rust sorted output
+    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+        if (a.file != b.file) return a.file < b.file;
+        return a.line < b.line;
+    });
+
+    // Format: "file:line:content" per match
+    std::ostringstream oss;
+    for (const auto& m : matches) {
+        oss << m.file << ":" << m.line << ":" << m.content << "\n";
+    }
+    if (capped) {
+        oss << "[Results capped at " << MAX_MATCHES << " matches]\n";
+    }
+    if (matches.empty()) {
+        oss << "No matches found.";
+    }
+    return ToolResult::ok(oss.str());
 }
 
 // ── GlobSearchTool ───────────────────────────────────────────────
@@ -55,8 +121,72 @@ nlohmann::json GlobSearchTool::parameters_schema() const {
 
 ToolResult GlobSearchTool::execute(const nlohmann::json& args) {
     if (!args.contains("pattern")) return ToolResult::fail("Missing: pattern");
-    // Would use filesystem recursive iteration with glob matching
-    return ToolResult::ok("[glob_search - not fully implemented]");
+    std::string glob_pattern = args["pattern"].get<std::string>();
+    // Rust cap: 10000 entries
+    static constexpr size_t MAX_ENTRIES = 10000;
+
+    std::string search_path = ".";
+    if (args.contains("path") && args["path"].is_string()) {
+        search_path = args["path"].get<std::string>();
+    }
+
+    // Convert glob pattern to regex:
+    // ** matches any path segment(s); * matches within one segment; ? matches one char.
+    auto glob_to_regex = [](const std::string& glob) -> std::string {
+        std::string re;
+        re.reserve(glob.size() * 2);
+        for (size_t i = 0; i < glob.size(); ++i) {
+            char c = glob[i];
+            if (c == '*' && i + 1 < glob.size() && glob[i+1] == '*') {
+                re += ".*"; ++i;  // ** -> .*
+            } else if (c == '*') {
+                re += "[^/\\\\]*";  // * -> any segment chars
+            } else if (c == '?') {
+                re += "[^/\\\\]";   // ? -> single segment char
+            } else if (std::string(".+^${}[]|()\\\\").find(c) != std::string::npos) {
+                re += '\\';
+                re += c;
+            } else {
+                re += c;
+            }
+        }
+        return re;
+    };
+
+    std::regex re;
+    try {
+        re = std::regex(glob_to_regex(glob_pattern), std::regex::icase);
+    } catch (const std::regex_error& e) {
+        return ToolResult::fail(std::string("Invalid glob: ") + e.what());
+    }
+
+    std::vector<std::string> paths;
+    bool capped = false;
+    std::error_code ec;
+    for (const auto& entry : fs::recursive_directory_iterator(search_path, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+
+        std::string rel = fs::relative(entry.path(), search_path, ec).string();
+        if (ec) rel = entry.path().string();
+        // Normalise path sep on Windows
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+
+        if (std::regex_match(rel, re) ||
+            std::regex_match(entry.path().filename().string(), re)) {
+            paths.push_back(rel);
+            if (paths.size() >= MAX_ENTRIES) { capped = true; break; }
+        }
+    }
+
+    // Sorted output — matching Rust
+    std::sort(paths.begin(), paths.end());
+
+    std::ostringstream oss;
+    for (const auto& p : paths) oss << p << "\n";
+    if (capped) oss << "[Results capped at " << MAX_ENTRIES << " entries]\n";
+    if (paths.empty()) oss << "No files matched.";
+    return ToolResult::ok(oss.str());
 }
 
 // ── CliDiscoveryTool ─────────────────────────────────────────────

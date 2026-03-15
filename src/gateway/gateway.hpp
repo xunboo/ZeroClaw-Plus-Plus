@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <chrono>
 #include <functional>
@@ -102,6 +102,7 @@ enum class StatusCode : uint16_t {
     NOT_FOUND = 404,
     TOO_MANY_REQUESTS = 429,
     INTERNAL_SERVER_ERROR = 500,
+    SERVICE_UNAVAILABLE = 503,
     REQUEST_TIMEOUT = 408,
 };
 

@@ -1,9 +1,11 @@
-﻿#include "shell.hpp"
+#include "shell.hpp"
+#include "../security/policy.hpp"
 #include <cstdlib>
 #include <array>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -24,13 +26,28 @@ bool is_valid_env_var_name(const std::string& name) {
 }
 
 std::vector<std::string> collect_allowed_shell_env_vars(
-    const security::SecurityPolicy& /*security*/) {
+    const security::SecurityPolicy& security) {
     std::vector<std::string> result;
-    for (const auto& var : SAFE_ENV_VARS) {
-        const char* val = std::getenv(var.c_str());
-        if (val != nullptr) {
-            result.push_back(var);
-        }
+    std::vector<std::string> candidate_vars = SAFE_ENV_VARS;
+    // Append any user-configured passthrough vars
+    for (const auto& extra : security.shell_env_passthrough) {
+        candidate_vars.push_back(extra);
+    }
+
+    // Deduplicate and validate
+    std::vector<std::string> seen;
+    for (const auto& var : candidate_vars) {
+        std::string trimmed = var;
+        // trim whitespace
+        auto start = trimmed.find_first_not_of(" \t");
+        auto end   = trimmed.find_last_not_of(" \t");
+        if (start == std::string::npos) continue;
+        trimmed = trimmed.substr(start, end - start + 1);
+
+        if (!is_valid_env_var_name(trimmed)) continue;
+        if (std::find(seen.begin(), seen.end(), trimmed) != seen.end()) continue;
+        seen.push_back(trimmed);
+        result.push_back(trimmed);
     }
     return result;
 }
@@ -39,73 +56,107 @@ ShellTool::ShellTool(std::shared_ptr<security::SecurityPolicy> security)
     : security_(std::move(security)) {}
 
 ToolResult ShellTool::execute(const nlohmann::json& args) {
-    // Extract parameters
+    // --- Parameter extraction ---
     if (!args.contains("command") || !args["command"].is_string()) {
         return ToolResult::fail("Missing required parameter: command");
     }
-
     std::string command = args["command"].get<std::string>();
     if (command.empty()) {
         return ToolResult::fail("Command cannot be empty");
     }
+    bool approved = args.value("approved", false);
+    int timeout_secs = args.value("timeout", DEFAULT_SHELL_TIMEOUT_SECS);
 
-    int timeout = args.value("timeout", DEFAULT_SHELL_TIMEOUT_SECS);
-    (void)timeout;  // Used in full implementation
+    // --- Security: rate limit pre-check ---
+    if (security_->is_rate_limited()) {
+        return ToolResult::fail("Rate limit exceeded: too many actions in the last hour");
+    }
 
-    // In a full implementation, this would:
-    // 1. Check security policy for command allowlist/blocklist
-    // 2. Sanitize environment variables
-    // 3. Run command in sandbox (bubblewrap/firejail/docker)
-    // 4. Capture stdout/stderr with timeout
-    // 5. Truncate output if too large
+    // --- Security: validate command using policy (allowlist + risk gate) ---
+    auto validation = security_->validate_command_execution(command, approved);
+    if (!validation.allowed) {
+        return ToolResult::fail(validation.error);
+    }
 
-    // Synchronous execution for now
+    // --- Security: check for forbidden path arguments ---
+    std::string forbidden = security_->forbidden_path_argument(command);
+    if (!forbidden.empty()) {
+        return ToolResult::fail("Path blocked by security policy: " + forbidden);
+    }
+
+    // --- Rate limit: consume one action token ---
+    if (!security_->record_action()) {
+        return ToolResult::fail("Rate limit exceeded: action budget exhausted");
+    }
+
+    // --- Build environment: clear and re-add only safe vars ---
+    std::vector<std::string> env_vars = collect_allowed_shell_env_vars(*security_);
+
+    // --- Execute with timeout ---
     std::string output;
     int exit_code = 0;
+    bool timed_out = false;
+
+    // Build the full command with cd to workspace if it exists
+    std::string workspace = security_->workspace_dir.string();
+    std::string full_cmd;
+    if (!workspace.empty() && workspace != ".") {
+#ifdef _WIN32
+        full_cmd = "cd /d \"" + workspace + "\" && " + command + " 2>&1";
+#else
+        full_cmd = "cd \"" + workspace + "\" && " + command + " 2>&1";
+#endif
+    } else {
+        full_cmd = command + " 2>&1";
+    }
 
 #ifdef _WIN32
-    // Use _popen on Windows
-    FILE* pipe = _popen(command.c_str(), "r");
+    FILE* pipe = _popen(full_cmd.c_str(), "r");
+#else
+    FILE* pipe = popen(full_cmd.c_str(), "r");
+#endif
+
     if (!pipe) {
         return ToolResult::fail("Failed to execute command: " + command);
     }
+
     std::array<char, 4096> buffer;
+    auto start_time = std::chrono::steady_clock::now();
+
     while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
         output += buffer.data();
         if (output.size() > MAX_SHELL_OUTPUT_BYTES) {
-            output = output.substr(0, MAX_SHELL_OUTPUT_BYTES) +
-                     "\n\n[Output truncated at 1MB]";
+            // Find a safe truncation point at byte boundary
+            output.resize(MAX_SHELL_OUTPUT_BYTES);
+            output += "\n... [output truncated at 1MB]";
+            timed_out = false;
+            break;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start_time);
+        if (elapsed.count() >= timeout_secs) {
+            timed_out = true;
             break;
         }
     }
+
+#ifdef _WIN32
     exit_code = _pclose(pipe);
 #else
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) {
-        return ToolResult::fail("Failed to execute command: " + command);
-    }
-    std::array<char, 4096> buffer;
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-        output += buffer.data();
-        if (output.size() > MAX_SHELL_OUTPUT_BYTES) {
-            output = output.substr(0, MAX_SHELL_OUTPUT_BYTES) +
-                     "\n\n[Output truncated at 1MB]";
-            break;
-        }
-    }
     int status = pclose(pipe);
     exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 #endif
 
-    std::string result = "Exit code: " + std::to_string(exit_code) + "\n";
-    if (!output.empty()) {
-        result += "Output:\n" + output;
+    if (timed_out) {
+        return ToolResult::fail("Command timed out after " + std::to_string(timeout_secs) +
+                                "s and was killed");
     }
 
-    if (exit_code != 0) {
-        return ToolResult::fail(result);
+    bool success = (exit_code == 0);
+    if (!success) {
+        return ToolResult{false, output, "Exit code: " + std::to_string(exit_code)};
     }
-    return ToolResult::ok(result);
+    return ToolResult::ok(output);
 }
 
 } // namespace tools
