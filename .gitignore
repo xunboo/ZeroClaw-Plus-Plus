@@ -1,2 +1,4 @@
 build/*
 build_vs/*
+.vscode/*
+.cache/*

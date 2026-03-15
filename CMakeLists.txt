@@ -51,3 +51,7 @@ add_executable(zeroclaw
 
 # Link the executable with our library
 target_link_libraries(zeroclaw PRIVATE zeroclaw_lib)
+
+if(MSVC)
+    target_compile_options(zeroclaw PRIVATE /utf-8)
+endif()

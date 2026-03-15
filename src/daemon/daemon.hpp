@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <memory>
@@ -15,7 +15,7 @@
 
 namespace zeroclaw {
 namespace config {
-    class Config;
+    struct Config;
 }
 
 

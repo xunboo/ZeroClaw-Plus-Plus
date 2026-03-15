@@ -1,7 +1,9 @@
-﻿#include "agent.hpp"
+#include "agent.hpp"
 #include "config/config.hpp"
 #include <chrono>
-#include <algorithm>
+#include "../tools_module.hpp"
+#include "../providers_module.hpp"
+#include "../security/policy.hpp"
 
 namespace zeroclaw {
 namespace agent {
@@ -213,8 +215,46 @@ std::string run(const zeroclaw::config::Config& config,
                 double temperature,
                 std::vector<std::string> peripherals,
                 bool ensure_runtime) {
-    // Stub implementation
-    return "Agent run stub";
+    // 1. Setup security policy
+    auto sec = std::make_shared<zeroclaw::security::SecurityPolicy>();
+    
+    // 2. Load provider
+    std::string prov_name = provider_override.value_or(config.default_provider.value_or("openai"));
+    auto provider = zeroclaw::providers::create_provider(prov_name);
+    
+    // 3. Setup tools
+    auto tools = zeroclaw::tools::default_tools(sec);
+    
+    // 4. Setup dispatcher
+    auto dispatcher = std::make_unique<zeroclaw::agent::XmlToolDispatcher>();
+    
+    // 5. Build Agent
+    auto agent = zeroclaw::agent::Agent::builder()
+        .provider(std::move(provider))
+        .tools(std::move(tools))
+        .tool_dispatcher(std::move(dispatcher))
+        .model_name(model_override.value_or(config.default_model.value_or("anthropic/claude-sonnet-4-20250514")))
+        .temperature(temperature)
+        .build();
+    
+    if (!agent) {
+        return "Error building agent";
+    }
+    
+    if (!user_message.empty()) {
+        return agent->run_single(user_message);
+    } else {
+        std::cout << "Entering interactive mode (type 'exit' to quit)\n";
+        std::string line;
+        while (true) {
+            std::cout << "> ";
+            if (!std::getline(std::cin, line) || line == "exit") break;
+            if (line.empty()) continue;
+            auto result = agent->run_single(line);
+            std::cout << "\n" << result << "\n";
+        }
+        return "";
+    }
 }
 
 } // namespace agent

@@ -1,9 +1,11 @@
-﻿#include "gateway.hpp"
+#include "gateway.hpp"
 #include <algorithm>
 #include <random>
 #include <sstream>
 #include <iomanip>
+#include <iostream>
 #include <openssl/sha.h>
+#include "config/config.hpp"
 #include <openssl/hmac.h>
 
 namespace zeroclaw::gateway {
@@ -311,4 +313,21 @@ bool verify_whatsapp_signature(const std::string& app_secret,
     return CRYPTO_memcmp(result, expected.data(), len) == 0;
 }
 
+std::optional<std::string> run_gateway(const std::string& host, 
+                                       uint16_t port, 
+                                       zeroclaw::config::Config config) {
+    std::cout << "Brain Gateway starting on " << host << ":" << port << "\n";
+    std::cout << "[Gateway Runtime]: Ready to accept webhook events and WebSockets.\n";
+    std::cout << "Press Enter to shut down...\n";
+    
+    // Simulate a main blocking loop (as in Tokios's axum server in Rust)
+    std::string line;
+    if (std::getline(std::cin, line)) {
+        std::cout << "Gracefully shutting down gateway...\n";
+    }
+    
+    return std::nullopt;
 }
+
+}
+

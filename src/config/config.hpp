@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -645,6 +645,7 @@ struct Config {
     TranscriptionConfig transcription;
 
     static Config create_default();
+    static Config load_or_init(const std::string& config_dir = "");
     void apply_env_overrides();
     bool validate() const;
 

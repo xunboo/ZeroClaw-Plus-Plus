@@ -1,4 +1,4 @@
-﻿#include "store.hpp"
+#include "store.hpp"
 #include "schedule.hpp"
 #include <chrono>
 #include <filesystem>
@@ -106,4 +106,105 @@ CronJob add_job(const std::string& workspace_dir, int max_run_history, const std
     return add_shell_job(workspace_dir, max_run_history, 100, std::nullopt, schedule, command);
 }
 
+CronJob add_shell_job(
+    const std::string& workspace_dir,
+    int max_run_history,
+    int max_tasks,
+    const std::optional<std::string>& name,
+    const Schedule& schedule,
+    const std::string& command
+) {
+    CronJob job;
+    job.id = "stub_id";
+    job.schedule = schedule;
+    job.command = command;
+    job.name = name;
+    job.job_type = JobType::Shell;
+    return job;
 }
+
+CronJob add_agent_job(
+    const std::string& workspace_dir,
+    int max_run_history,
+    int max_tasks,
+    const std::optional<std::string>& name,
+    const Schedule& schedule,
+    const std::string& prompt,
+    SessionTarget session_target,
+    const std::optional<std::string>& model,
+    const std::optional<DeliveryConfig>& delivery,
+    bool delete_after_run
+) {
+    CronJob job;
+    job.id = "stub_agent_job";
+    job.schedule = schedule;
+    job.prompt = prompt;
+    job.name = name;
+    job.job_type = JobType::Agent;
+    job.session_target = session_target;
+    job.model = model;
+    if (delivery) job.delivery = *delivery;
+    job.delete_after_run = delete_after_run;
+    return job;
+}
+
+std::vector<CronJob> list_jobs(const std::string& workspace_dir) {
+    return {};
+}
+
+CronJob get_job(const std::string& workspace_dir, const std::string& job_id) {
+    return CronJob();
+}
+
+void remove_job(const std::string& workspace_dir, const std::string& id) {
+    // Stub
+}
+
+std::vector<CronJob> due_jobs(const std::string& workspace_dir, int max_tasks, TimePoint now) {
+    return {};
+}
+
+CronJob update_job(const std::string& workspace_dir, int max_tasks, const std::string& job_id, const CronJobPatch& patch) {
+    return CronJob();
+}
+
+void record_last_run(
+    const std::string& workspace_dir,
+    const std::string& job_id,
+    TimePoint finished_at,
+    bool success,
+    const std::string& output
+) {
+    // Stub
+}
+
+void reschedule_after_run(
+    const std::string& workspace_dir,
+    int max_tasks,
+    const std::string& job_id,
+    const Schedule& schedule,
+    bool success,
+    const std::string& output
+) {
+    // Stub
+}
+
+void record_run(
+    const std::string& workspace_dir,
+    int max_run_history,
+    const std::string& job_id,
+    TimePoint started_at,
+    TimePoint finished_at,
+    const std::string& status,
+    const std::optional<std::string>& output,
+    int64_t duration_ms
+) {
+    // Stub
+}
+
+std::vector<CronRun> list_runs(const std::string& workspace_dir, const std::string& job_id, size_t limit) {
+    return {};
+}
+
+}
+

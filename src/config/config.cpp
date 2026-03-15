@@ -1,4 +1,4 @@
-﻿#include "config.hpp"
+#include "config.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <sstream>
@@ -236,6 +236,18 @@ Config Config::create_default() {
         "shell", "file_write", "browser_open", "browser", "memory_forget"
     };
     
+    return config;
+}
+
+Config Config::load_or_init(const std::string& config_dir) {
+    Config config = create_default();
+    if (!config_dir.empty()) {
+        std::filesystem::path dir(config_dir);
+        config.config_path = dir / "config.toml";
+        config.workspace_dir = dir / "workspace";
+    }
+    // Note: TOML loading is currently stubbed out in from_toml. 
+    // This just maps the defaults and paths according to Rust's fallback logic.
     return config;
 }
 
