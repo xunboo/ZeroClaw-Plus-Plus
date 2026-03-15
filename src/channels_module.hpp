@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /// Channels module — aggregates all channel implementations and provides
 /// the orchestration layer for multi-channel message processing.
@@ -101,6 +101,17 @@ std::string conversation_history_key(const ChannelMessage& msg);
 
 /// Start all background supervised channels
 void start_channels(const zeroclaw::config::Config& config);
+
+/// Run health checks for configured channels
+void channel_doctor(const zeroclaw::config::Config& config);
+
+/// Get a list of (channel_name, is_configured) pairs
+std::vector<std::pair<std::string, bool>> list_configured_channels(const zeroclaw::config::Config& config);
+
+/// Handle a channel CLI subcommand (list, doctor, etc.)
+void handle_command(const zeroclaw::config::Config& config, const std::string& subcommand,
+                    const std::string& arg1 = "", const std::string& arg2 = "",
+                    const std::string& arg3 = "");
 
 } // namespace channels
 } // namespace zeroclaw

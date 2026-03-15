@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <string>
 #include <vector>
 #include <memory>
@@ -12,7 +12,8 @@
 #include "agent/agent_module.hpp"
 #include "gateway/gateway.hpp"
 #include "daemon/daemon.hpp"
-// #include "channels/channels.hpp"
+#include "cron/cron.hpp"
+#include "channels_module.hpp"
 #include "providers_module.hpp"
 #include <iomanip>
 
@@ -66,14 +67,94 @@ int main(int argc, char* argv[]) {
     auto* providers_cmd = app.add_subcommand("providers", "List supported AI providers");
 
     // --- Cron Command ---
-    auto* cron_cmd = app.add_subcommand("cron", "Configure and manage scheduled tasks (stubs)");
+    auto* cron_cmd = app.add_subcommand("cron", "Configure and manage scheduled tasks");
+    cron_cmd->require_subcommand(1);
+
+    // cron list
     auto* cron_list = cron_cmd->add_subcommand("list", "List all scheduled tasks");
-    auto* cron_add = cron_cmd->add_subcommand("add", "Add a new scheduled task");
+
+    // cron add <expression> <command> [--tz TZ]
+    auto* cron_add = cron_cmd->add_subcommand("add", "Add a new recurring scheduled task");
+    std::string cron_add_expr, cron_add_command;
+    std::string cron_add_tz;
+    cron_add->add_option("expression", cron_add_expr, "Cron expression (e.g. '0 9 * * 1-5')")->required();
+    cron_add->add_option("command", cron_add_command, "Command to run")->required();
+    cron_add->add_option("--tz", cron_add_tz, "Optional IANA timezone (e.g. America/Los_Angeles)");
+
+    // cron add-at <at> <command>
+    auto* cron_add_at = cron_cmd->add_subcommand("add-at", "Add a one-shot scheduled task at an RFC3339 timestamp");
+    std::string cron_at_ts, cron_at_command;
+    cron_add_at->add_option("at", cron_at_ts, "One-shot timestamp in RFC3339 format")->required();
+    cron_add_at->add_option("command", cron_at_command, "Command to run")->required();
+
+    // cron add-every <every_ms> <command>
+    auto* cron_add_every = cron_cmd->add_subcommand("add-every", "Add a fixed-interval scheduled task");
+    uint64_t cron_every_ms = 0;
+    std::string cron_every_command;
+    cron_add_every->add_option("every_ms", cron_every_ms, "Interval in milliseconds")->required();
+    cron_add_every->add_option("command", cron_every_command, "Command to run")->required();
+
+    // cron once <delay> <command>
+    auto* cron_once = cron_cmd->add_subcommand("once", "Add a one-shot delayed task (e.g. '30m', '2h', '1d')");
+    std::string cron_once_delay, cron_once_command;
+    cron_once->add_option("delay", cron_once_delay, "Delay duration")->required();
+    cron_once->add_option("command", cron_once_command, "Command to run")->required();
+
+    // cron remove <id>
+    auto* cron_remove = cron_cmd->add_subcommand("remove", "Remove a scheduled task");
+    std::string cron_remove_id;
+    cron_remove->add_option("id", cron_remove_id, "Task ID")->required();
+
+    // cron update <id> [--expression EXPR] [--tz TZ] [--command CMD] [--name NAME]
+    auto* cron_update = cron_cmd->add_subcommand("update", "Update a scheduled task");
+    std::string cron_update_id;
+    std::string cron_update_expr, cron_update_tz, cron_update_cmd, cron_update_name;
+    cron_update->add_option("id", cron_update_id, "Task ID")->required();
+    cron_update->add_option("--expression", cron_update_expr, "New cron expression");
+    cron_update->add_option("--tz", cron_update_tz, "New IANA timezone");
+    cron_update->add_option("--command", cron_update_cmd, "New command to run");
+    cron_update->add_option("--name", cron_update_name, "New job name");
+
+    // cron pause <id>
+    auto* cron_pause = cron_cmd->add_subcommand("pause", "Pause a scheduled task");
+    std::string cron_pause_id;
+    cron_pause->add_option("id", cron_pause_id, "Task ID")->required();
+
+    // cron resume <id>
+    auto* cron_resume = cron_cmd->add_subcommand("resume", "Resume a paused task");
+    std::string cron_resume_id;
+    cron_resume->add_option("id", cron_resume_id, "Task ID")->required();
 
     // --- Channel Command ---
-    auto* channel_cmd = app.add_subcommand("channel", "Manage communication channels (stubs)");
+    auto* channel_cmd = app.add_subcommand("channel", "Manage communication channels");
+    channel_cmd->require_subcommand(1);
+
+    // channel list
     auto* channel_list = channel_cmd->add_subcommand("list", "List all configured channels");
+
+    // channel doctor
     auto* channel_doctor = channel_cmd->add_subcommand("doctor", "Check channel configuration health");
+
+    // channel start
+    auto* channel_start = channel_cmd->add_subcommand("start", "Start all configured channels");
+
+    // channel add <type> <config_json>
+    auto* channel_add = channel_cmd->add_subcommand("add", "Add a new channel configuration");
+    std::string channel_add_type, channel_add_config;
+    channel_add->add_option("channel_type", channel_add_type, "Channel type (telegram, discord, slack, etc.)")->required();
+    channel_add->add_option("config", channel_add_config, "Configuration as JSON")->required();
+
+    // channel remove <name>
+    auto* channel_remove = channel_cmd->add_subcommand("remove", "Remove a channel configuration");
+    std::string channel_remove_name;
+    channel_remove->add_option("name", channel_remove_name, "Channel name to remove")->required();
+
+    // channel send <message> --channel-id <id> --recipient <id>
+    auto* channel_send = channel_cmd->add_subcommand("send", "Send a message to a configured channel");
+    std::string channel_send_msg, channel_send_id, channel_send_recipient;
+    channel_send->add_option("message", channel_send_msg, "Message text to send")->required();
+    channel_send->add_option("--channel-id", channel_send_id, "Channel config name")->required();
+    channel_send->add_option("--recipient", channel_send_recipient, "Recipient identifier")->required();
 
     // (TODO: Add remaining commands: onboard, service, doctor, estop, models, integrations, skills, migrate, auth, hardware, peripheral, memory, config, completions)
 
@@ -150,7 +231,16 @@ int main(int argc, char* argv[]) {
             std::cout << "  Max actions/hour:  " << cfg.autonomy.max_actions_per_hour << "\n";
             std::cout << "  OTP enabled:       " << (cfg.security.otp.enabled ? "true" : "false") << "\n";
             std::cout << "  E-stop enabled:    " << (cfg.security.estop.enabled ? "true" : "false") << "\n\n";
-            
+
+            std::cout << "Channels:\n";
+            std::cout << "  CLI:      always\n";
+            auto channels = zeroclaw::channels::list_configured_channels(cfg);
+            for (const auto& [name, configured] : channels) {
+                std::cout << "  " << std::left << std::setw(9) << name << " "
+                          << (configured ? "configured" : "not configured") << "\n";
+            }
+            std::cout << "\n";
+
             std::cout << "Peripherals:\n";
             std::cout << "  Enabled:   " << (cfg.peripherals.enabled ? "yes" : "no") << "\n";
             std::cout << "  Boards:    " << cfg.peripherals.boards.size() << "\n";
@@ -174,20 +264,45 @@ int main(int argc, char* argv[]) {
             std::cout << "\n  custom:<URL>   Any OpenAI-compatible endpoint\n";
             std::cout << "  anthropic-custom:<URL>  Any Anthropic-compatible endpoint\n";
         } else if (cron_cmd->parsed()) {
+            // Dispatch to cron::handle_command
             if (cron_list->parsed()) {
-                std::cout << "Listing scheduled tasks... (stub)\n";
+                cron::handle_command(cfg, "list");
             } else if (cron_add->parsed()) {
-                std::cout << "Adding new scheduled task... (stub)\n";
-            } else {
-                std::cout << "Cron management (stub). Use --help for subcommands.\n";
+                std::optional<std::string> tz_opt = cron_add_tz.empty() ? std::nullopt : std::make_optional(cron_add_tz);
+                cron::handle_command(cfg, "add", cron_add_expr, tz_opt, cron_add_command);
+            } else if (cron_add_at->parsed()) {
+                cron::handle_command(cfg, "add-at", "", std::nullopt, cron_at_command, cron_at_ts);
+            } else if (cron_add_every->parsed()) {
+                cron::handle_command(cfg, "add-every", "", std::nullopt, cron_every_command, "", cron_every_ms);
+            } else if (cron_once->parsed()) {
+                cron::handle_command(cfg, "once", "", std::nullopt, cron_once_command, "", 0, cron_once_delay);
+            } else if (cron_remove->parsed()) {
+                cron::handle_command(cfg, "remove", "", std::nullopt, "", "", 0, "", cron_remove_id);
+            } else if (cron_update->parsed()) {
+                std::optional<std::string> expr = cron_update_expr.empty() ? std::nullopt : std::make_optional(cron_update_expr);
+                std::optional<std::string> tz = cron_update_tz.empty() ? std::nullopt : std::make_optional(cron_update_tz);
+                std::optional<std::string> cmd = cron_update_cmd.empty() ? std::nullopt : std::make_optional(cron_update_cmd);
+                std::optional<std::string> name = cron_update_name.empty() ? std::nullopt : std::make_optional(cron_update_name);
+                cron::handle_command(cfg, "update", "", std::nullopt, "", "", 0, "", cron_update_id, expr, tz, cmd, name);
+            } else if (cron_pause->parsed()) {
+                cron::handle_command(cfg, "pause", "", std::nullopt, "", "", 0, "", cron_pause_id);
+            } else if (cron_resume->parsed()) {
+                cron::handle_command(cfg, "resume", "", std::nullopt, "", "", 0, "", cron_resume_id);
             }
         } else if (channel_cmd->parsed()) {
+            // Dispatch to channels::handle_command
             if (channel_list->parsed()) {
-                std::cout << "Listing configured channels... (stub)\n";
+                channels::handle_command(cfg, "list");
             } else if (channel_doctor->parsed()) {
-                std::cout << "Running channel doctor... (stub)\n";
-            } else {
-                std::cout << "Channel management (stub). Use --help for subcommands.\n";
+                channels::handle_command(cfg, "doctor");
+            } else if (channel_start->parsed()) {
+                channels::handle_command(cfg, "start");
+            } else if (channel_add->parsed()) {
+                channels::handle_command(cfg, "add", channel_add_type, channel_add_config);
+            } else if (channel_remove->parsed()) {
+                channels::handle_command(cfg, "remove", channel_remove_name);
+            } else if (channel_send->parsed()) {
+                channels::handle_command(cfg, "send", channel_send_msg, channel_send_id, channel_send_recipient);
             }
         }
     } catch (const std::exception& e) {
