@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "gateway.hpp"
 #include <string>
@@ -23,5 +23,6 @@ http::Response handle_static(const http::Request& req);
 http::Response handle_spa_fallback(const http::Request& req);
 
 void set_asset_provider(std::unique_ptr<IStaticAssetProvider> provider);
+void initialize_filesystem_assets(const std::string& base_path);
 
 }

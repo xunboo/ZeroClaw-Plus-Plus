@@ -1,17 +1,58 @@
 #include "static_files.hpp"
 #include <unordered_map>
 #include <mutex>
+#include <fstream>
+#include <filesystem>
+#include <optional>
 
 namespace zeroclaw::gateway::static_files {
 
 namespace {
     std::unique_ptr<IStaticAssetProvider> g_asset_provider;
     std::mutex g_provider_mutex;
+
+    class FileSystemAssetProvider : public IStaticAssetProvider {
+    public:
+        explicit FileSystemAssetProvider(std::string base_path) : base_path_(std::move(base_path)) {}
+
+        std::optional<StaticAsset> get(const std::string& path) const override {
+            std::filesystem::path fpath(base_path_);
+            fpath /= path;
+            
+            if (!std::filesystem::exists(fpath) || std::filesystem::is_directory(fpath)) {
+                return std::nullopt;
+            }
+
+            std::ifstream file(fpath.string(), std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                return std::nullopt;
+            }
+
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+
+            StaticAsset asset;
+            asset.data.resize(size);
+            if (!file.read(reinterpret_cast<char*>(asset.data.data()), size)) {
+                return std::nullopt;
+            }
+
+            asset.immutable = false; // Usually only embedded assets are marked immutable
+            return asset;
+        }
+
+    private:
+        std::string base_path_;
+    };
 }
 
 void set_asset_provider(std::unique_ptr<IStaticAssetProvider> provider) {
     std::lock_guard<std::mutex> lock(g_provider_mutex);
     g_asset_provider = std::move(provider);
+}
+
+void initialize_filesystem_assets(const std::string& base_path) {
+    set_asset_provider(std::make_unique<FileSystemAssetProvider>(base_path));
 }
 
 static std::string guess_mime_type(const std::string& path) {
